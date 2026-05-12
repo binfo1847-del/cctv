@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Camera Broadcast</title>
+  <script src="https://www.gstatic.com/firebasejs/11.6.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.6.0/firebase-database-compat.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; background: #111; color: #eee; min-height: 100vh; }
+    header { background: #1a2a1a; padding: 16px 24px; border-bottom: 1px solid #2a4a2a; }
+    header h1 { color: #5dcaa5; font-size: 20px; }
+    header p { color: #888; font-size: 13px; margin-top: 4px; }
+    .container { max-width: 640px; margin: 0 auto; padding: 24px; }
+    video { width: 100%; border-radius: 12px; background: #000; aspect-ratio: 16/9; border: 1px solid #2a2a2a; }
+    .controls { margin-top: 20px; display: flex; flex-direction: column; gap: 12px; }
+    label { font-size: 13px; color: #888; }
+    input[type="text"] { width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid #333; background: #1a1a1a; color: #eee; font-size: 14px; }
+    input[type="text"]:focus { outline: none; border-color: #1d9e75; }
+    .btn-group { display: flex; gap: 10px; }
+    button { flex: 1; padding: 10px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; }
+    button.primary { background: #1d9e75; color: #fff; }
+    button.primary:hover { background: #17a070; }
+    button.danger { background: #c0392b; color: #fff; }
+    button.danger:hover { background: #a93226; }
+    button:disabled { background: #333; color: #666; cursor: not-allowed; }
+    #status { margin-top: 16px; padding: 12px; border-radius: 8px; font-size: 13px; white-space: pre-line; }
+    #status.info { background: #1d9e7522; color: #1d9e75; border: 1px solid #1d9e7555; }
+    #status.error { background: #c0392b22; color: #e74c3c; border: 1px solid #c0392b55; }
+    #status.success { background: #2ecc7122; color: #2ecc71; border: 1px solid #2ecc7155; }
+    #status.warn { background: #f39c1222; color: #f39c12; border: 1px solid #f39c1255; }
+    .cam-id-display { font-size: 12px; color: #666; margin-top: 8px; }
+    .server-note { margin-top: 20px; padding: 16px; background: #1a1a2e; border: 1px solid #2a2a4e; border-radius: 8px; font-size: 13px; color: #888; }
+    .server-note code { background: #222; color: #5dcaa5; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Camera Broadcaster</h1>
+    <p>Broadcast your camera via WebRTC + Firebase RTDB</p>
+  </header>
+  <div class="container">
+    <video id="localVideo" autoplay playsinline muted></video>
+    <div class="controls">
+      <label>Camera Name</label>
+      <input type="text" id="cameraName" placeholder="e.g. Front Door Camera" value="Camera 1">
+      <div class="btn-group">
+        <button id="startBtn" class="primary">Start Broadcast</button>
+        <button id="stopBtn" class="danger" disabled>Stop</button>
+      </div>
+      <div class="cam-id-display" id="camIdDisplay"></div>
+    </div>
+    <div id="status" class="info">Click "Start Broadcast" to begin</div>
+    <div class="server-note" id="serverNote">
+      Camera access requires HTTPS or localhost.<br>
+      Run this to serve the folder: <code>npx serve .</code>
+    </div>
+  </div>
+
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyDewq8U_BYuu01lwgYYTYdvh6bxG8sB3Fc",
+      authDomain: "cctv-4aa4c.firebaseapp.com",
+      databaseURL: "https://cctv-4aa4c-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "cctv-4aa4c",
+      storageBucket: "cctv-4aa4c.firebasestorage.app",
+      messagingSenderId: "864560354333",
+      appId: "1:864560354333:web:5664d82a983f025ba062f4",
+      measurementId: "G-YZG0B4T82Z"
+    };
+
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    const localVideo = document.getElementById("localVideo");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const statusEl = document.getElementById("status");
+    const cameraNameInput = document.getElementById("cameraName");
+    const camIdDisplay = document.getElementById("camIdDisplay");
+    const serverNote = document.getElementById("serverNote");
+
+    let localStream = null;
+    let pc = null;
+    let cameraId = null;
+    let cameraRef = null;
+
+    if (location.protocol === "file:") {
+      setStatus("ERROR: File protocol detected.\nCamera access requires HTTPS or http://localhost.\n\nUse a local server:\nnpx serve .\n\nThen open http://localhost:3000/camera.html", "error");
+    }
+
+    function setStatus(msg, type = "info") {
+      statusEl.textContent = msg;
+      statusEl.className = type;
+    }
+
+    startBtn.addEventListener("click", startBroadcast);
+    stopBtn.addEventListener("click", stopBroadcast);
+
+    async function startBroadcast() {
+      if (location.protocol === "file:") {
+        setStatus("Cannot access camera via file:// protocol.\nUse a local HTTP server instead.", "error");
+        return;
+      }
+
+      const name = cameraNameInput.value.trim() || "Camera";
+      cameraId = name.toLowerCase().replace(/[^a-z0-9]/g, "-") + "-" + Date.now().toString(36);
+      cameraRef = db.ref(`cameras/${cameraId}`);
+
+      setStatus("Requesting camera access...");
+
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+        localVideo.srcObject = localStream;
+      } catch (err) {
+        if (err.name === "NotAllowedError") {
+          setStatus("Camera permission denied.\nAllow camera access in browser settings and try again.", "error");
+        } else if (err.name === "NotFoundError") {
+          setStatus("No camera found on this device.", "error");
+        } else {
+          setStatus(`Camera error: ${err.message}`, "error");
+        }
+        return;
+      }
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      camIdDisplay.textContent = `Camera ID: ${cameraId}`;
+      serverNote.style.display = "none";
+
+      setStatus("Creating WebRTC offer...");
+
+      try {
+        pc = new RTCPeerConnection({
+          iceServers: [
+            { urls: "stun:stun.l.google.com:19302" }
+          ]
+        });
+
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            db.ref(`cameras/${cameraId}/candidates`).push(event.candidate.toJSON());
+          }
+        };
+
+        pc.oniceconnectionstatechange = () => {
+          if (pc.iceConnectionState === "connected") {
+            setStatus("Viewer connected! Streaming...", "success");
+          } else if (pc.iceConnectionState === "disconnected") {
+            setStatus("Viewer disconnected", "info");
+          }
+        };
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        await cameraRef.set({
+          name: name,
+          status: "online",
+          offer: offer.toJSON()
+        });
+
+        cameraRef.onDisconnect().remove();
+
+        db.ref(`cameras/${cameraId}/answer`).on("child_added", async (snap) => {
+          if (snap.key === "answer" && snap.val()) {
+            await pc.setRemoteDescription(new RTCSessionDescription(snap.val()));
+            setStatus("Viewer connected. Streaming video...", "success");
+          }
+        });
+
+        db.ref(`cameras/${cameraId}/viewerCandidates`).on("child_added", (snap) => {
+          if (snap.val()) {
+            pc.addIceCandidate(new RTCIceCandidate(snap.val()));
+          }
+        });
+
+        setStatus(`Broadcasting "${name}" - waiting for viewer...`);
+
+      } catch (err) {
+        console.error(err);
+        setStatus(`Error: ${err.message}`, "error");
+        stopBroadcast();
+      }
+    }
+
+    function stopBroadcast() {
+      if (pc) { pc.close(); pc = null; }
+      if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+      if (cameraRef) { cameraRef.remove(); cameraRef = null; }
+      localVideo.srcObject = null;
+      cameraId = null;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      camIdDisplay.textContent = "";
+      serverNote.style.display = "block";
+      setStatus("Broadcast stopped", "info");
+    }
+  </script>
+</body>
+</html>
