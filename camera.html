@@ -78,6 +78,8 @@
     let pc = null;
     let cameraId = null;
     let cameraRef = null;
+    let answerRef = null;
+    let viewerCandRef = null;
 
     function setStatus(msg, type) { statusEl.textContent = msg; statusEl.className = type || "info"; }
 
@@ -140,15 +142,20 @@
         cameraRef.onDisconnect().remove();
         setStatus("Broadcasting \"" + name + "\" - waiting for viewer...");
 
-        db.ref("cameras/" + cameraId + "/answer").on("value", (snap) => {
+        answerRef = db.ref("cameras/" + cameraId + "/answer");
+        viewerCandRef = db.ref("cameras/" + cameraId + "/viewerCandidates");
+
+        answerRef.on("value", (snap) => {
           if (snap.val() && snap.val().type) {
-            pc.setRemoteDescription(new RTCSessionDescription(snap.val()));
-            setStatus("Viewer connected! Streaming...", "success");
+            if (pc && pc.signalingState !== "closed") {
+              pc.setRemoteDescription(new RTCSessionDescription(snap.val()));
+              setStatus("Viewer connected! Streaming...", "success");
+            }
           }
         });
 
-        db.ref("cameras/" + cameraId + "/viewerCandidates").on("child_added", (snap) => {
-          if (snap.val()) {
+        viewerCandRef.on("child_added", (snap) => {
+          if (snap.val() && pc && pc.signalingState !== "closed") {
             const c = snap.val();
             pc.addIceCandidate(new RTCIceCandidate({ candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex }));
           }
@@ -161,6 +168,8 @@
     }
 
     function stopBroadcast() {
+      if (answerRef) { answerRef.off(); answerRef = null; }
+      if (viewerCandRef) { viewerCandRef.off(); viewerCandRef = null; }
       if (pc) { pc.close(); pc = null; }
       if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
       if (cameraRef) { cameraRef.remove(); cameraRef = null; }

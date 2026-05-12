@@ -72,6 +72,7 @@
     const statusEl = document.getElementById("status");
 
     const peerConnections = {};
+    const firebaseRefs = {};
 
     camerasRef.on("value", (snapshot) => {
       const cameras = snapshot.val();
@@ -112,10 +113,7 @@
 
     async function connectToCamera(cameraId, btn) {
       if (peerConnections[cameraId]) {
-        peerConnections[cameraId].close();
-        delete peerConnections[cameraId];
-        btn.textContent = "Connect to Stream";
-        document.getElementById(`video-${cameraId}`).srcObject = null;
+        cleanup(cameraId);
         return;
       }
 
@@ -129,6 +127,9 @@
         });
         peerConnections[cameraId] = pc;
 
+        const candidatesRef = db.ref(`cameras/${cameraId}/candidates`);
+        firebaseRefs[cameraId] = { candidatesRef };
+
         pc.ontrack = (event) => {
           video.srcObject = event.streams[0];
           btn.textContent = "Disconnect";
@@ -136,7 +137,7 @@
         };
 
         pc.onicecandidate = (event) => {
-          if (event.candidate) {
+          if (event.candidate && peerConnections[cameraId]) {
             db.ref(`cameras/${cameraId}/viewerCandidates`).push({
               candidate: event.candidate.candidate,
               sdpMid: event.candidate.sdpMid,
@@ -160,10 +161,11 @@
         await pc.setLocalDescription(answer);
         await db.ref(`cameras/${cameraId}/answer`).set({ type: answer.type, sdp: answer.sdp });
 
-        db.ref(`cameras/${cameraId}/candidates`).on("child_added", (snap) => {
-          if (snap.val()) {
+        candidatesRef.on("child_added", (snap) => {
+          const pc2 = peerConnections[cameraId];
+          if (pc2 && pc2.signalingState !== "closed" && snap.val()) {
             const c = snap.val();
-            pc.addIceCandidate(new RTCIceCandidate({ candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex }));
+            pc2.addIceCandidate(new RTCIceCandidate({ candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex }));
           }
         });
 
@@ -180,6 +182,10 @@
     }
 
     function cleanup(cameraId) {
+      if (firebaseRefs[cameraId]) {
+        firebaseRefs[cameraId].candidatesRef.off();
+        delete firebaseRefs[cameraId];
+      }
       if (peerConnections[cameraId]) {
         peerConnections[cameraId].close();
         delete peerConnections[cameraId];
