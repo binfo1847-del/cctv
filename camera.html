@@ -140,9 +140,9 @@
         cameraRef.onDisconnect().remove();
         setStatus("Broadcasting \"" + name + "\" - waiting for viewer...");
 
-        db.ref("cameras/" + cameraId + "/answer").on("child_added", async (snap) => {
-          if (snap.key === "answer" && snap.val()) {
-            await pc.setRemoteDescription(new RTCSessionDescription(snap.val()));
+        db.ref("cameras/" + cameraId + "/answer").on("value", (snap) => {
+          if (snap.val() && snap.val().type) {
+            pc.setRemoteDescription(new RTCSessionDescription(snap.val()));
             setStatus("Viewer connected! Streaming...", "success");
           }
         });
