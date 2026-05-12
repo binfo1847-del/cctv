@@ -66,6 +66,24 @@
       transition: opacity 0.3s; z-index: 999;
     }
     #remoteToast.show { opacity: 1; }
+
+    /* Wake lock status bar */
+    #wakeLockBar {
+      display: none;
+      margin-top: 10px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      background: #1a2a1a;
+      color: #5dcaa5;
+      border: 1px solid #2a4a2a;
+      align-items: center;
+      gap: 8px;
+    }
+    #wakeLockBar.visible { display: flex; }
+    #wakeLockBar.lost { color: #f39c12; border-color: #f39c1244; background: #f39c1211; }
+    .wl-dot { width: 8px; height: 8px; border-radius: 50%; background: #5dcaa5; animation: pulse 2s infinite; }
+    #wakeLockBar.lost .wl-dot { background: #f39c12; animation: none; }
   </style>
 </head>
 <body>
@@ -93,6 +111,10 @@
         <button id="startBtn" class="primary">Start Broadcast</button>
         <button id="stopBtn" class="danger" disabled>Stop</button>
       </div>
+      <div id="wakeLockBar">
+        <div class="wl-dot"></div>
+        <span id="wakeLockMsg">Screen kept awake — stream will continue</span>
+      </div>
       <div class="cam-id-display" id="camIdDisplay"></div>
       <div class="viewer-count" id="viewerCount"></div>
     </div>
@@ -114,19 +136,21 @@
     firebase.initializeApp(firebaseConfig);
     const db = firebase.database();
 
-    const localVideo   = document.getElementById("localVideo");
-    const startBtn     = document.getElementById("startBtn");
-    const stopBtn      = document.getElementById("stopBtn");
-    const statusEl     = document.getElementById("status");
-    const camIdDisplay = document.getElementById("camIdDisplay");
-    const viewerCount  = document.getElementById("viewerCount");
-    const micBtn       = document.getElementById("micBtn");
-    const flipBtn      = document.getElementById("flipBtn");
-    const micIndicator = document.getElementById("micIndicator");
-    const micDot       = document.getElementById("micDot");
-    const micLabel     = document.getElementById("micLabel");
-    const camFaceBadge = document.getElementById("camFaceBadge");
-    const remoteToast  = document.getElementById("remoteToast");
+    const localVideo    = document.getElementById("localVideo");
+    const startBtn      = document.getElementById("startBtn");
+    const stopBtn       = document.getElementById("stopBtn");
+    const statusEl      = document.getElementById("status");
+    const camIdDisplay  = document.getElementById("camIdDisplay");
+    const viewerCount   = document.getElementById("viewerCount");
+    const micBtn        = document.getElementById("micBtn");
+    const flipBtn       = document.getElementById("flipBtn");
+    const micIndicator  = document.getElementById("micIndicator");
+    const micDot        = document.getElementById("micDot");
+    const micLabel      = document.getElementById("micLabel");
+    const camFaceBadge  = document.getElementById("camFaceBadge");
+    const remoteToast   = document.getElementById("remoteToast");
+    const wakeLockBar   = document.getElementById("wakeLockBar");
+    const wakeLockMsg   = document.getElementById("wakeLockMsg");
 
     const RTC_CONFIG = {
       iceServers: [
@@ -143,15 +167,126 @@
     const viewers = {};
     let cmdRef = null;
 
-    function setStatus(msg, type) { statusEl.textContent = msg; statusEl.className = type || "info"; }
-    function updateViewerCount() {
-      const n = Object.keys(viewers).length;
-      viewerCount.textContent = n > 0 ? `${n} viewer${n > 1 ? "s" : ""} connected` : "";
+    // ── Wake Lock ────────────────────────────────────────────────
+    let wakeLock = null;
+
+    async function acquireWakeLock() {
+      if (!("wakeLock" in navigator)) {
+        wakeLockBar.classList.add("visible", "lost");
+        wakeLockMsg.textContent = "Wake Lock not supported — keep screen on manually";
+        return;
+      }
+      try {
+        wakeLock = await navigator.wakeLock.request("screen");
+        wakeLockBar.classList.add("visible");
+        wakeLockBar.classList.remove("lost");
+        wakeLockMsg.textContent = "Screen kept awake — stream will continue";
+
+        wakeLock.addEventListener("release", () => {
+          // Re-acquire if broadcasting still active and tab visible
+          if (cameraId && document.visibilityState === "visible") {
+            acquireWakeLock();
+          } else {
+            wakeLockBar.classList.add("lost");
+            wakeLockMsg.textContent = "Wake lock released — screen may sleep";
+          }
+        });
+      } catch (err) {
+        wakeLockBar.classList.add("visible", "lost");
+        wakeLockMsg.textContent = "Wake Lock failed: " + err.message;
+      }
     }
+
+    function releaseWakeLock() {
+      if (wakeLock) { wakeLock.release(); wakeLock = null; }
+      wakeLockBar.classList.remove("visible", "lost");
+    }
+
+    // Re-acquire wake lock when tab becomes visible again (e.g. user returns)
+    document.addEventListener("visibilitychange", async () => {
+      if (document.visibilityState === "visible" && cameraId) {
+        // Re-acquire wake lock
+        if (!wakeLock || wakeLock.released) await acquireWakeLock();
+        // Check if any video track ended while in background — restart stream
+        const videoTracks = localStream ? localStream.getVideoTracks() : [];
+        if (videoTracks.length === 0 || videoTracks[0].readyState === "ended") {
+          showToast("Restarting camera track...");
+          await restartVideoTrack();
+        }
+      }
+    });
+
+    // ── MediaSession — keeps audio session alive in background ──
+    function setupMediaSession() {
+      if (!("mediaSession" in navigator)) return;
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: "CCTV Broadcasting",
+        artist: document.getElementById("cameraName").value || "Camera",
+        album: "Live Stream"
+      });
+      // Dummy handlers so OS doesn't kill the session
+      navigator.mediaSession.setActionHandler("play",  () => {});
+      navigator.mediaSession.setActionHandler("pause", () => {});
+      navigator.mediaSession.setActionHandler("stop",  () => stopBroadcast());
+    }
+
+    // ── Silent audio trick — keeps browser audio session alive ──
+    // A silent AudioContext oscillator prevents Chrome/Firefox from
+    // suspending the tab's media pipeline when screen goes off.
+    let audioCtx = null;
+    let silentSource = null;
+
+    function startSilentAudio() {
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = audioCtx.createOscillator();
+        const gainNode   = audioCtx.createGain();
+        gainNode.gain.value = 0.00001; // essentially silent
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        oscillator.start();
+        silentSource = oscillator;
+      } catch (e) { /* non-critical */ }
+    }
+
+    function stopSilentAudio() {
+      try { if (silentSource) silentSource.stop(); } catch {}
+      try { if (audioCtx) audioCtx.close(); } catch {}
+      silentSource = null; audioCtx = null;
+    }
+
+    // ── Restart video track after background suspend ─────────────
+    async function restartVideoTrack() {
+      try {
+        const newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: currentFacing === "environment"
+            ? { ideal: "environment" } : { ideal: "user" } },
+          audio: false
+        });
+        const newTrack = newStream.getVideoTracks()[0];
+        if (!newTrack) return;
+
+        const oldTrack = localStream.getVideoTracks()[0];
+        if (oldTrack) localStream.removeTrack(oldTrack);
+        localStream.addTrack(newTrack);
+        localVideo.srcObject = localStream;
+
+        for (const vid of Object.values(viewers)) {
+          const sender = vid.pc.getSenders().find(s => s.track && s.track.kind === "video");
+          if (sender) await sender.replaceTrack(newTrack).catch(() => {});
+        }
+        setStatus(`Broadcasting — stream recovered`, "success");
+      } catch (err) {
+        setStatus("Stream recovery failed: " + err.message, "error");
+      }
+    }
+
+    // ── Toast ────────────────────────────────────────────────────
+    function setStatus(msg, type) { statusEl.textContent = msg; statusEl.className = type || "info"; }
 
     let toastTimer = null;
     function showToast(msg) {
-      remoteToast.textContent = "📡 Remote: " + msg;
+      remoteToast.textContent = "📡 " + msg;
       remoteToast.classList.add("show");
       if (toastTimer) clearTimeout(toastTimer);
       toastTimer = setTimeout(() => remoteToast.classList.remove("show"), 2500);
@@ -161,6 +296,7 @@
       setStatus("Use a local server:\nnpx serve .\n\nThen open http://localhost:3000/camera.html", "error");
     }
 
+    // ── Mic toggle ───────────────────────────────────────────────
     micBtn.addEventListener("click", () => toggleMic());
 
     function toggleMic(fromRemote = false) {
@@ -177,6 +313,7 @@
       if (fromRemote) showToast(isMicMuted ? "Mic Muted" : "Mic Unmuted");
     }
 
+    // ── Flip camera ──────────────────────────────────────────────
     flipBtn.addEventListener("click", () => flipCamera());
 
     async function flipCamera(fromRemote = false) {
@@ -185,9 +322,7 @@
       currentFacing = currentFacing === "environment" ? "user" : "environment";
       const doFlip = async (exact) => {
         localStream.getVideoTracks().forEach(t => t.stop());
-        const constraint = exact
-          ? { facingMode: { exact: currentFacing } }
-          : { facingMode: currentFacing };
+        const constraint = exact ? { facingMode: { exact: currentFacing } } : { facingMode: currentFacing };
         const ns = await navigator.mediaDevices.getUserMedia({ video: constraint, audio: false });
         const newTrack = ns.getVideoTracks()[0];
         const oldTrack = localStream.getVideoTracks()[0];
@@ -202,29 +337,26 @@
         if (cameraRef) cameraRef.update({ facing: currentFacing });
         if (fromRemote) showToast(currentFacing === "user" ? "Switched to Front Camera" : "Switched to Back Camera");
       };
-      try {
-        await doFlip(true);
-      } catch {
-        try { await doFlip(false); }
-        catch (e) {
-          setStatus("Camera flip failed: " + e.message, "warn");
-          currentFacing = currentFacing === "environment" ? "user" : "environment";
-        }
-      }
+      try { await doFlip(true); }
+      catch { try { await doFlip(false); } catch (e) {
+        setStatus("Camera flip failed: " + e.message, "warn");
+        currentFacing = currentFacing === "environment" ? "user" : "environment";
+      }}
       flipBtn.disabled = false;
     }
 
+    // ── Remote commands ──────────────────────────────────────────
     function listenForRemoteCommands() {
       cmdRef = db.ref(`cameras/${cameraId}/remoteCmd`);
       cmdRef.on("child_added", async (snap) => {
         const cmd = snap.val();
         if (!cmd || !cmd.action) return;
-        snap.ref.remove(); // consume the command
+        snap.ref.remove();
         switch (cmd.action) {
-          case "muteMic":   if (!isMicMuted) toggleMic(true); break;
-          case "unmuteMic": if (isMicMuted)  toggleMic(true); break;
-          case "toggleMic": toggleMic(true); break;
-          case "flipCamera": await flipCamera(true); break;
+          case "muteMic":        if (!isMicMuted) toggleMic(true); break;
+          case "unmuteMic":      if (isMicMuted)  toggleMic(true); break;
+          case "toggleMic":      toggleMic(true); break;
+          case "flipCamera":     await flipCamera(true); break;
           case "stopBroadcast":
             showToast("Broadcast stopped remotely");
             setTimeout(() => stopBroadcast(), 800);
@@ -233,6 +365,7 @@
       });
     }
 
+    // ── Start broadcast ──────────────────────────────────────────
     startBtn.addEventListener("click", startBroadcast);
     stopBtn.addEventListener("click", stopBroadcast);
 
@@ -240,6 +373,7 @@
       if (location.protocol === "file:") { setStatus("Cannot use file:// protocol", "error"); return; }
       startBtn.disabled = true;
       setStatus("Requesting camera & microphone...");
+
       try {
         localStream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: { ideal: "environment" } }, audio: true
@@ -258,6 +392,22 @@
           return;
         }
       }
+
+      // ── Background-survival setup ────────────────────────────
+      await acquireWakeLock();   // Keep screen on
+      startSilentAudio();        // Keep audio pipeline alive
+      setupMediaSession();       // Register with OS media controls
+
+      // Watch for video track ending (OS killed it in background)
+      localStream.getVideoTracks().forEach(track => {
+        track.addEventListener("ended", async () => {
+          if (cameraId) {
+            showToast("Camera track ended — recovering...");
+            await restartVideoTrack();
+          }
+        });
+      });
+      // ────────────────────────────────────────────────────────
 
       micBtn.disabled = false; flipBtn.disabled = false;
       micIndicator.classList.add("visible"); camFaceBadge.classList.add("visible");
@@ -279,13 +429,13 @@
 
         listenForRemoteCommands();
 
-        const requestsRef = db.ref(`cameras/${cameraId}/viewerRequests`);
-        requestsRef.on("child_added", async (snap) => {
+        db.ref(`cameras/${cameraId}/viewerRequests`).on("child_added", async (snap) => {
           const viewerId = snap.key;
           if (viewers[viewerId]) return;
           await handleNewViewer(viewerId);
         });
         db.ref(`cameras/${cameraId}/viewers`).on("child_removed", (snap) => cleanupViewer(snap.key));
+
       } catch (err) {
         setStatus("Broadcast setup failed:\n" + err.message + "\n\nCheck Firebase Rules.", "error");
       }
@@ -306,7 +456,8 @@
         };
         pc.oniceconnectionstatechange = () => {
           const s = pc.iceConnectionState;
-          if (s === "connected" || s === "completed") setStatus(`Viewer${Object.keys(viewers).length>1?"s":""} connected! Streaming...`, "success");
+          if (s === "connected" || s === "completed")
+            setStatus(`Viewer${Object.keys(viewers).length>1?"s":""} connected! Streaming...`, "success");
           else if (s === "failed") cleanupViewer(viewerId);
           updateViewerCount();
         };
@@ -345,6 +496,11 @@
       delete viewers[viewerId]; updateViewerCount();
     }
 
+    function updateViewerCount() {
+      const n = Object.keys(viewers).length;
+      viewerCount.textContent = n > 0 ? `${n} viewer${n > 1 ? "s" : ""} connected` : "";
+    }
+
     function stopBroadcast() {
       if (cmdRef) { cmdRef.off(); cmdRef = null; }
       Object.keys(viewers).forEach(cleanupViewer);
@@ -352,6 +508,10 @@
       if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
       localVideo.srcObject = null;
       if (cameraRef) { cameraRef.remove(); cameraRef = null; }
+
+      releaseWakeLock();
+      stopSilentAudio();
+
       cameraId = null; isMicMuted = false; currentFacing = "environment";
       startBtn.disabled = false; stopBtn.disabled = true;
       micBtn.disabled = true; flipBtn.disabled = true;
