@@ -9,38 +9,98 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: system-ui, sans-serif; background: #111; color: #eee; min-height: 100vh; }
-    header { background: #1a2a1a; padding: 16px 24px; border-bottom: 1px solid #2a4a2a; }
+    header { background: #1a2a1a; padding: 16px 24px; border-bottom: 1px solid #2a4a2a; display: flex; align-items: center; justify-content: space-between; }
     header h1 { color: #5dcaa5; font-size: 20px; }
     header p { color: #888; font-size: 13px; margin-top: 4px; }
     .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
-    .cameras-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; margin-top: 20px; }
+    .cameras-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 20px; margin-top: 20px; }
+
+    /* Camera card */
     .camera-card { background: #1a1a1a; border-radius: 12px; border: 1px solid #2a2a2a; overflow: hidden; transition: border-color 0.2s; }
     .camera-card.online { border-color: #1d9e75; }
     .camera-card.offline { border-color: #444; opacity: 0.6; }
-    .camera-card .card-header { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #222; }
-    .camera-card .name { font-weight: 600; font-size: 14px; }
-    .camera-card .status-badge { font-size: 11px; padding: 2px 10px; border-radius: 10px; }
+
+    .card-header { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #222; }
+    .card-header .name { font-weight: 600; font-size: 14px; }
+    .status-badge { font-size: 11px; padding: 2px 10px; border-radius: 10px; }
     .status-badge.online { background: #1d9e7522; color: #1d9e75; border: 1px solid #1d9e75; }
     .status-badge.offline { background: #444; color: #888; }
+    .stale-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #f39c1222; color: #f39c12; border: 1px solid #f39c1244; }
+
+    /* Video wrapper */
+    .video-wrapper { position: relative; }
     .camera-card video { width: 100%; display: block; background: #000; aspect-ratio: 16/9; }
-    .camera-card .actions { padding: 10px 16px; display: flex; gap: 8px; }
-    .camera-card button { flex: 1; padding: 8px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; background: #1d9e75; color: #fff; font-weight: 500; }
-    .camera-card button:hover { background: #17a070; }
-    .camera-card button:disabled { background: #333; color: #666; cursor: not-allowed; }
-    .camera-card button.danger { background: #c0392b; }
-    .camera-card button.danger:hover { background: #a93226; }
+
+    /* Camera state overlays on video */
+    .cam-state-overlay {
+      position: absolute; top: 8px; left: 8px;
+      display: flex; gap: 6px; pointer-events: none;
+    }
+    .state-pill {
+      background: rgba(0,0,0,0.65); border-radius: 20px;
+      padding: 3px 9px; font-size: 11px; color: #aaa;
+      backdrop-filter: blur(4px); display: flex; align-items: center; gap: 4px;
+    }
+    .state-pill .dot { width: 6px; height: 6px; border-radius: 50%; }
+    .state-pill.mic-on .dot  { background: #1d9e75; animation: pulse 1.2s infinite; }
+    .state-pill.mic-off .dot { background: #c0392b; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    /* Connect button row */
+    .actions { padding: 10px 16px; display: flex; gap: 8px; border-top: 1px solid #222; }
+    .actions button { flex: 1; padding: 8px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; background: #1d9e75; color: #fff; font-weight: 500; }
+    .actions button:hover { background: #17a070; }
+    .actions button:disabled { background: #333; color: #666; cursor: not-allowed; }
+    .actions button.danger { background: #c0392b; }
+    .actions button.danger:hover { background: #a93226; }
+
+    /* ── Remote control panel ── */
+    .remote-panel {
+      border-top: 1px solid #222;
+      padding: 10px 16px 14px;
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .remote-panel.visible { display: flex; }
+    .remote-panel-label {
+      font-size: 11px; color: #555; letter-spacing: 0.06em;
+      text-transform: uppercase; margin-bottom: 2px;
+    }
+    .remote-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+    .remote-btns button {
+      flex: 1; min-width: 80px; padding: 8px 6px;
+      border: none; border-radius: 8px; cursor: pointer;
+      font-size: 12px; font-weight: 600; transition: background 0.15s, transform 0.1s;
+      display: flex; align-items: center; justify-content: center; gap: 5px;
+    }
+    .remote-btns button:active { transform: scale(0.95); }
+    .remote-btns button.rc-mic   { background: #1d9e7533; color: #1d9e75; border: 1px solid #1d9e7555; }
+    .remote-btns button.rc-mic:hover { background: #1d9e7560; }
+    .remote-btns button.rc-mic.muted { background: #c0392b33; color: #e74c3c; border: 1px solid #c0392b55; }
+    .remote-btns button.rc-mic.muted:hover { background: #c0392b60; }
+    .remote-btns button.rc-flip  { background: #2a2a4a; color: #8888ff; border: 1px solid #3333aa55; }
+    .remote-btns button.rc-flip:hover { background: #33336a; }
+    .remote-btns button.rc-stop  { background: #c0392b22; color: #e74c3c; border: 1px solid #c0392b55; }
+    .remote-btns button.rc-stop:hover { background: #c0392b44; }
+
+    /* Feedback flash on remote button */
+    .remote-btns button.sent { animation: flash 0.35s ease; }
+    @keyframes flash { 0%{opacity:1} 50%{opacity:0.4} 100%{opacity:1} }
+
     .no-cameras { text-align: center; padding: 60px 20px; color: #666; }
     .no-cameras h2 { font-size: 18px; margin-bottom: 8px; }
-    .no-cameras p { font-size: 13px; }
+    .no-cameras p  { font-size: 13px; }
     .no-cameras code { background: #222; color: #5dcaa5; padding: 2px 6px; border-radius: 4px; }
     #statusBar { color: #888; font-size: 13px; margin-top: 16px; text-align: center; }
-    .stale-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #f39c1222; color: #f39c12; border: 1px solid #f39c1244; }
   </style>
 </head>
 <body>
   <header>
-    <h1>CCTV Viewer</h1>
-    <p>WebRTC cameras via Firebase RTDB signaling</p>
+    <div>
+      <h1>CCTV Viewer</h1>
+      <p>WebRTC cameras via Firebase RTDB signaling</p>
+    </div>
   </header>
   <div class="container">
     <div id="cameras-container">
@@ -54,9 +114,6 @@
   </div>
 
   <script>
-    // =====================================================================
-    // FIX 1: Same Firebase config — keep in sync with camera.html
-    // =====================================================================
     const firebaseConfig = {
       apiKey: "AIzaSyDewq8U_BYuu01lwgYYTYdvh6bxG8sB3Fc",
       authDomain: "cctv-4aa4c.firebaseapp.com",
@@ -70,7 +127,6 @@
     firebase.initializeApp(firebaseConfig);
     const db = firebase.database();
 
-    // FIX 2: TURN servers added
     const RTC_CONFIG = {
       iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
@@ -85,22 +141,22 @@
     const emptyState = document.getElementById("empty-state");
     const statusBar  = document.getElementById("statusBar");
 
-    // Unique viewer ID for this browser tab (for multi-viewer support)
     const MY_VIEWER_ID = "viewer-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
 
-    const peerConnections = {};  // cameraId -> RTCPeerConnection
-    const fbRefs          = {};  // cameraId -> [Firebase refs to cleanup]
-    const knownCameras    = {};  // cameraId -> true (to avoid duplicate cards)
+    const peerConnections = {};
+    const fbRefs          = {};
+    const knownCameras    = {};
+    // Per-camera cached state (mic, facing) from Firebase
+    const cameraStates    = {};
 
     const camerasRef = db.ref("cameras");
 
-    // FIX 3: Use child_added / child_removed instead of "value"
-    // — prevents full grid re-render and dropping existing connections
     camerasRef.on("child_added", (snap) => {
       const cameraId = snap.key;
       const data     = snap.val();
       if (!data || knownCameras[cameraId]) return;
       knownCameras[cameraId] = true;
+      cameraStates[cameraId] = { micMuted: data.micMuted || false, facing: data.facing || "environment" };
       addCameraCard(cameraId, data);
       updateUI();
     });
@@ -111,19 +167,37 @@
       const card = document.getElementById(`card-${cameraId}`);
       if (card) card.remove();
       delete knownCameras[cameraId];
+      delete cameraStates[cameraId];
       updateUI();
     });
 
-    // FIX 4: Detect stale cameras (lastSeen > 30s ago) and mark them
     camerasRef.on("child_changed", (snap) => {
       const cameraId = snap.key;
       const data     = snap.val();
       if (!data) return;
+
+      // Update status badge
       const badge = document.getElementById(`badge-${cameraId}`);
-      if (!badge) return;
-      const stale = data.lastSeen && (Date.now() - data.lastSeen > 30000);
-      badge.className = stale ? "status-badge stale-badge" : "status-badge online";
-      badge.textContent = stale ? "STALE" : "LIVE";
+      if (badge) {
+        const stale = data.lastSeen && (Date.now() - data.lastSeen > 30000);
+        badge.className = stale ? "status-badge stale-badge" : "status-badge online";
+        badge.textContent = stale ? "STALE" : "LIVE";
+      }
+
+      // Sync mic state → update remote mic button label
+      if (data.micMuted !== undefined) {
+        cameraStates[cameraId] = cameraStates[cameraId] || {};
+        cameraStates[cameraId].micMuted = data.micMuted;
+        updateRemoteMicBtn(cameraId, data.micMuted);
+        updateMicOverlay(cameraId, data.micMuted);
+      }
+
+      // Sync facing state → update overlay badge
+      if (data.facing !== undefined) {
+        cameraStates[cameraId] = cameraStates[cameraId] || {};
+        cameraStates[cameraId].facing = data.facing;
+        updateFacingOverlay(cameraId, data.facing);
+      }
     });
 
     function updateUI() {
@@ -139,7 +213,30 @@
       }
     }
 
+    function updateRemoteMicBtn(cameraId, micMuted) {
+      const btn = document.getElementById(`rc-mic-${cameraId}`);
+      if (!btn) return;
+      btn.classList.toggle("muted", micMuted);
+      btn.innerHTML = micMuted ? "🔇 Unmute Mic" : "🎙️ Mute Mic";
+    }
+
+    function updateMicOverlay(cameraId, micMuted) {
+      const pill = document.getElementById(`mic-pill-${cameraId}`);
+      if (!pill) return;
+      pill.className = "state-pill " + (micMuted ? "mic-off" : "mic-on");
+      pill.innerHTML = `<span class="dot"></span>${micMuted ? "Muted" : "Mic On"}`;
+    }
+
+    function updateFacingOverlay(cameraId, facing) {
+      const pill = document.getElementById(`face-pill-${cameraId}`);
+      if (!pill) return;
+      pill.textContent = facing === "user" ? "📷 Front" : "📷 Back";
+    }
+
     function addCameraCard(cameraId, data) {
+      const micMuted = data.micMuted || false;
+      const facing   = data.facing   || "environment";
+
       const card = document.createElement("div");
       card.className = "camera-card online";
       card.id = `card-${cameraId}`;
@@ -148,21 +245,63 @@
           <span class="name">${data.name || cameraId}</span>
           <span class="status-badge online" id="badge-${cameraId}">LIVE</span>
         </div>
-        <video id="video-${cameraId}" autoplay playsinline muted></video>
+
+        <div class="video-wrapper">
+          <video id="video-${cameraId}" autoplay playsinline muted></video>
+          <div class="cam-state-overlay">
+            <div class="state-pill ${micMuted ? "mic-off" : "mic-on"}" id="mic-pill-${cameraId}">
+              <span class="dot"></span>${micMuted ? "Muted" : "Mic On"}
+            </div>
+            <div class="state-pill" id="face-pill-${cameraId}">
+              ${facing === "user" ? "📷 Front" : "📷 Back"}
+            </div>
+          </div>
+        </div>
+
         <div class="actions">
-          <button id="btn-${cameraId}">Connect to Stream</button>
+          <button id="btn-${cameraId}">▶ Connect to Stream</button>
+        </div>
+
+        <!-- Remote Control Panel — always visible, commands work even without stream -->
+        <div class="remote-panel visible" id="remote-${cameraId}">
+          <div class="remote-panel-label">Remote Control</div>
+          <div class="remote-btns">
+            <button class="rc-mic ${micMuted ? "muted" : ""}" id="rc-mic-${cameraId}"
+              onclick="sendCmd('${cameraId}', 'toggleMic', this)">
+              ${micMuted ? "🔇 Unmute Mic" : "🎙️ Mute Mic"}
+            </button>
+            <button class="rc-flip" onclick="sendCmd('${cameraId}', 'flipCamera', this)">
+              🔄 Flip Camera
+            </button>
+            <button class="rc-stop" onclick="sendCmd('${cameraId}', 'stopBroadcast', this)">
+              ⏹ Stop Camera
+            </button>
+          </div>
         </div>
       `;
-      card.querySelector("button").addEventListener("click", () => {
-        if (peerConnections[cameraId]) {
-          cleanup(cameraId);
-        } else {
-          connectToCamera(cameraId);
-        }
+
+      card.querySelector(`#btn-${cameraId}`).addEventListener("click", () => {
+        if (peerConnections[cameraId]) cleanup(cameraId);
+        else connectToCamera(cameraId);
       });
+
       grid.appendChild(card);
     }
 
+    // ── Send remote command to camera via Firebase ──────────────
+    async function sendCmd(cameraId, action, btnEl) {
+      try {
+        await db.ref(`cameras/${cameraId}/remoteCmd`).push({ action, ts: Date.now() });
+        if (btnEl) {
+          btnEl.classList.add("sent");
+          setTimeout(() => btnEl.classList.remove("sent"), 400);
+        }
+      } catch (err) {
+        statusBar.textContent = "Command failed: " + err.message;
+      }
+    }
+
+    // ── WebRTC connect ───────────────────────────────────────────
     async function connectToCamera(cameraId) {
       const btn = document.getElementById(`btn-${cameraId}`);
       if (!btn) return;
@@ -171,20 +310,16 @@
 
       try {
         const video = document.getElementById(`video-${cameraId}`);
-
-        // FIX 5: Multi-viewer — use per-viewer path under cameras/{camId}/viewers/{viewerId}
-        // FIX 2: Use full RTC_CONFIG with TURN
         const pc = new RTCPeerConnection(RTC_CONFIG);
         peerConnections[cameraId] = pc;
         fbRefs[cameraId] = [];
 
-        // FIX 6: ICE candidate queue — buffer until remoteDescription is set
         const iceCandQueue = [];
         let remoteSet = false;
 
         pc.ontrack = (event) => {
           video.srcObject = event.streams[0];
-          btn.textContent = "Disconnect";
+          btn.textContent = "⏸ Disconnect";
           btn.disabled = false;
           btn.className = "danger";
         };
@@ -194,13 +329,11 @@
           if (state === "disconnected" || state === "failed") cleanup(cameraId);
         };
 
-        // Signal to camera that we want to connect
         const viewerReqRef = db.ref(`cameras/${cameraId}/viewerRequests/${MY_VIEWER_ID}`);
         await viewerReqRef.set({ joined: Date.now() });
         viewerReqRef.onDisconnect().remove();
         fbRefs[cameraId].push(viewerReqRef);
 
-        // Wait for camera to write an offer for us
         const offerRef = db.ref(`cameras/${cameraId}/viewers/${MY_VIEWER_ID}/offer`);
         fbRefs[cameraId].push(offerRef);
 
@@ -215,21 +348,13 @@
         }).then(async (offer) => {
           await pc.setRemoteDescription(new RTCSessionDescription(offer));
           remoteSet = true;
-
-          // Apply queued ICE candidates
-          for (const c of iceCandQueue) {
-            await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
-          }
+          for (const c of iceCandQueue) await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
           iceCandQueue.length = 0;
-
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
-          await db.ref(`cameras/${cameraId}/viewers/${MY_VIEWER_ID}/answer`).set({
-            type: answer.type, sdp: answer.sdp
-          });
+          await db.ref(`cameras/${cameraId}/viewers/${MY_VIEWER_ID}/answer`).set({ type: answer.type, sdp: answer.sdp });
         });
 
-        // Send our ICE candidates to camera
         pc.onicecandidate = (event) => {
           if (event.candidate) {
             db.ref(`cameras/${cameraId}/viewers/${MY_VIEWER_ID}/viewerCandidates`).push({
@@ -240,33 +365,28 @@
           }
         };
 
-        // Receive camera's ICE candidates
         const camCandRef = db.ref(`cameras/${cameraId}/viewers/${MY_VIEWER_ID}/camCandidates`);
         fbRefs[cameraId].push(camCandRef);
         camCandRef.on("child_added", async (snap) => {
           const c = snap.val();
           if (!c || pc.signalingState === "closed") return;
-          if (!remoteSet) {
-            iceCandQueue.push(c);
-          } else {
-            await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
-          }
+          if (!remoteSet) iceCandQueue.push(c);
+          else await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
         });
 
-        btn.textContent = "Disconnect";
+        btn.textContent = "⏸ Disconnect";
         btn.disabled = false;
         btn.className = "danger";
 
       } catch (err) {
         console.error("Connect error:", err);
         statusBar.textContent = "Error: " + err.message;
-        if (btn) { btn.textContent = "Connect to Stream"; btn.disabled = false; btn.className = ""; }
+        if (btn) { btn.textContent = "▶ Connect to Stream"; btn.disabled = false; btn.className = ""; }
         delete peerConnections[cameraId];
       }
     }
 
     function cleanup(cameraId) {
-      // Turn off all Firebase listeners for this camera
       if (fbRefs[cameraId]) {
         fbRefs[cameraId].forEach(r => { try { r.off(); r.remove(); } catch (e) {} });
         delete fbRefs[cameraId];
@@ -275,17 +395,15 @@
         peerConnections[cameraId].close();
         delete peerConnections[cameraId];
       }
-      // Clean up our viewer slot in Firebase
       db.ref(`cameras/${cameraId}/viewers/${MY_VIEWER_ID}`).remove();
       db.ref(`cameras/${cameraId}/viewerRequests/${MY_VIEWER_ID}`).remove();
 
       const btn = document.getElementById(`btn-${cameraId}`);
-      if (btn) { btn.textContent = "Connect to Stream"; btn.disabled = false; btn.className = ""; }
+      if (btn) { btn.textContent = "▶ Connect to Stream"; btn.disabled = false; btn.className = ""; }
       const video = document.getElementById(`video-${cameraId}`);
       if (video) video.srcObject = null;
     }
 
-    // FIX 7: Cleanup all listeners and Firebase refs on page close
     window.addEventListener("beforeunload", () => {
       camerasRef.off();
       Object.keys(peerConnections).forEach(cleanup);
