@@ -31,8 +31,6 @@
     #status.success { background: #2ecc7122; color: #2ecc71; border: 1px solid #2ecc7155; }
     #status.warn { background: #f39c1222; color: #f39c12; border: 1px solid #f39c1255; }
     .cam-id-display { font-size: 12px; color: #666; margin-top: 8px; }
-    .server-note { margin-top: 20px; padding: 16px; background: #1a1a2e; border: 1px solid #2a2a4e; border-radius: 8px; font-size: 13px; color: #888; }
-    .server-note code { background: #222; color: #5dcaa5; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -51,7 +49,7 @@
       </div>
       <div class="cam-id-display" id="camIdDisplay"></div>
     </div>
-    <div id="status" class="info"></div>
+    <div id="status" class="info">Click "Start Broadcast"</div>
   </div>
 
   <script>
@@ -84,89 +82,81 @@
     function setStatus(msg, type) { statusEl.textContent = msg; statusEl.className = type || "info"; }
 
     if (location.protocol === "file:") {
-      setStatus("ERROR: File protocol detected. Use a local server:\n\nnpx serve .\n\nThen open http://localhost:3000/camera.html", "error");
-    } else {
-      setStatus("Click 'Start Broadcast' to begin");
+      setStatus("Use a local server:\nnpx serve .\n\nThen open http://localhost:3000/camera.html", "error");
     }
 
     startBtn.addEventListener("click", startBroadcast);
     stopBtn.addEventListener("click", stopBroadcast);
 
     async function startBroadcast() {
-      if (location.protocol === "file:") {
-        setStatus("Cannot access camera via file:// protocol.", "error");
-        return;
-      }
-
-      const name = cameraNameInput.value.trim() || "Camera";
-      cameraId = name.toLowerCase().replace(/[^a-z0-9]/g, "-") + "-" + Date.now().toString(36);
-      cameraRef = db.ref(`cameras/${cameraId}`);
-
-      setStatus("Requesting camera access...");
+      if (location.protocol === "file:") { setStatus("Cannot use file:// protocol", "error"); return; }
       startBtn.disabled = true;
 
+      setStatus("Requesting camera...");
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
         localVideo.srcObject = localStream;
-        setStatus("Camera connected. Creating WebRTC offer...");
+        setStatus("Camera is live. Starting WebRTC broadcast...", "success");
       } catch (err) {
         startBtn.disabled = false;
-        if (err.name === "NotAllowedError") setStatus("Camera permission denied.\nAllow camera in browser settings, then refresh and try again.", "error");
-        else if (err.name === "NotFoundError") setStatus("No camera found on this device.", "error");
-        else setStatus(`Camera error: ${err.message}`, "error");
+        if (err.name === "NotAllowedError") setStatus("Camera permission denied.\nAllow camera access and try again.", "error");
+        else if (err.name === "NotFoundError") setStatus("No camera found.", "error");
+        else setStatus("Camera error: " + err.message, "error");
         return;
       }
 
       stopBtn.disabled = false;
-      camIdDisplay.textContent = `Camera ID: ${cameraId}`;
+      const name = cameraNameInput.value.trim() || "Camera";
+      cameraId = name.toLowerCase().replace(/[^a-z0-9]/g, "-") + "-" + Date.now().toString(36);
+      cameraRef = db.ref("cameras/" + cameraId);
+      camIdDisplay.textContent = "Camera ID: " + cameraId;
 
+      // WebRTC setup (separate try/catch - won't stop camera if it fails)
       try {
-        pc = new RTCPeerConnection({
-          iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-        });
-
+        pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
         localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
         pc.onicecandidate = (event) => {
           if (event.candidate) {
-            db.ref(`cameras/${cameraId}/candidates`).push(event.candidate.toJSON());
+            db.ref("cameras/" + cameraId + "/candidates").push({
+              candidate: event.candidate.candidate,
+              sdpMid: event.candidate.sdpMid,
+              sdpMLineIndex: event.candidate.sdpMLineIndex
+            });
           }
         };
 
         pc.oniceconnectionstatechange = () => {
           if (pc.iceConnectionState === "connected") setStatus("Viewer connected! Streaming...", "success");
-          else if (pc.iceConnectionState === "disconnected") setStatus("Viewer disconnected", "info");
-          else if (pc.iceConnectionState === "failed") setStatus("Connection failed. Try again.", "error");
+          else if (pc.iceConnectionState === "disconnected") setStatus("Waiting for viewer...");
+          else if (pc.iceConnectionState === "failed") setStatus("Connection failed. Camera still running.", "warn");
         };
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        setStatus("Offer created. Writing to Firebase...");
 
-        await cameraRef.set({
-          name: name,
-          status: "online",
-          offer: offer.toJSON()
-        });
-
+        setStatus("Writing to Firebase...");
+        await cameraRef.set({ name: name, status: "online", offer: { type: offer.type, sdp: offer.sdp } });
         cameraRef.onDisconnect().remove();
-        setStatus(`Broadcasting "${name}" - waiting for viewer...`);
+        setStatus("Broadcasting \"" + name + "\" - waiting for viewer...");
 
-        db.ref(`cameras/${cameraId}/answer`).on("child_added", async (snap) => {
+        db.ref("cameras/" + cameraId + "/answer").on("child_added", async (snap) => {
           if (snap.key === "answer" && snap.val()) {
             await pc.setRemoteDescription(new RTCSessionDescription(snap.val()));
-            setStatus("Viewer connected. Streaming...", "success");
+            setStatus("Viewer connected! Streaming...", "success");
           }
         });
 
-        db.ref(`cameras/${cameraId}/viewerCandidates`).on("child_added", (snap) => {
-          if (snap.val()) pc.addIceCandidate(new RTCIceCandidate(snap.val()));
+        db.ref("cameras/" + cameraId + "/viewerCandidates").on("child_added", (snap) => {
+          if (snap.val()) {
+            const c = snap.val();
+            pc.addIceCandidate(new RTCIceCandidate({ candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex }));
+          }
         });
 
       } catch (err) {
-        console.error("Broadcast error:", err);
-        setStatus(`Error: ${err.message}`, "error");
-        stopBroadcast();
+        console.error("WebRTC/Firebase error:", err);
+        setStatus("Camera is running but broadcast setup failed:\n" + err.message + "\n\nCheck Firebase Rules: Realtime Database > Rules\nSet .read and .write to true", "error");
       }
     }
 
