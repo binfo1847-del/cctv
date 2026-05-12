@@ -17,22 +17,24 @@
     .camera-card { background: #1a1a1a; border-radius: 12px; border: 1px solid #2a2a2a; overflow: hidden; transition: border-color 0.2s; }
     .camera-card.online { border-color: #1d9e75; }
     .camera-card.offline { border-color: #444; opacity: 0.6; }
-    .camera-card .header { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #222; }
+    .camera-card .card-header { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #222; }
     .camera-card .name { font-weight: 600; font-size: 14px; }
     .camera-card .status-badge { font-size: 11px; padding: 2px 10px; border-radius: 10px; }
     .status-badge.online { background: #1d9e7522; color: #1d9e75; border: 1px solid #1d9e75; }
     .status-badge.offline { background: #444; color: #888; }
     .camera-card video { width: 100%; display: block; background: #000; aspect-ratio: 16/9; }
-    .camera-card .actions { padding: 10px 16px; }
-    .camera-card button { width: 100%; padding: 8px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; background: #1d9e75; color: #fff; font-weight: 500; }
+    .camera-card .actions { padding: 10px 16px; display: flex; gap: 8px; }
+    .camera-card button { flex: 1; padding: 8px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; background: #1d9e75; color: #fff; font-weight: 500; }
     .camera-card button:hover { background: #17a070; }
     .camera-card button:disabled { background: #333; color: #666; cursor: not-allowed; }
+    .camera-card button.danger { background: #c0392b; }
+    .camera-card button.danger:hover { background: #a93226; }
     .no-cameras { text-align: center; padding: 60px 20px; color: #666; }
     .no-cameras h2 { font-size: 18px; margin-bottom: 8px; }
     .no-cameras p { font-size: 13px; }
     .no-cameras code { background: #222; color: #5dcaa5; padding: 2px 6px; border-radius: 4px; }
-    #status { color: #888; font-size: 13px; margin-top: 16px; text-align: center; }
-    .stream-count { font-size: 13px; color: #5dcaa5; text-align: center; margin-top: 8px; }
+    #statusBar { color: #888; font-size: 13px; margin-top: 16px; text-align: center; }
+    .stale-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #f39c1222; color: #f39c12; border: 1px solid #f39c1244; }
   </style>
 </head>
 <body>
@@ -46,12 +48,15 @@
         <h2>No cameras available</h2>
         <p>Open <code>camera.html</code> on a device to start broadcasting.</p>
       </div>
-      <div class="cameras-grid" id="cameras-grid"></div>
+      <div class="cameras-grid" id="cameras-grid" style="display:none"></div>
     </div>
-    <div id="status">Connecting to Firebase...</div>
+    <div id="statusBar">Connecting to Firebase...</div>
   </div>
 
   <script>
+    // =====================================================================
+    // FIX 1: Same Firebase config — keep in sync with camera.html
+    // =====================================================================
     const firebaseConfig = {
       apiKey: "AIzaSyDewq8U_BYuu01lwgYYTYdvh6bxG8sB3Fc",
       authDomain: "cctv-4aa4c.firebaseapp.com",
@@ -59,86 +64,175 @@
       projectId: "cctv-4aa4c",
       storageBucket: "cctv-4aa4c.firebasestorage.app",
       messagingSenderId: "864560354333",
-      appId: "1:864560354333:web:5664d82a983f025ba062f4",
-      measurementId: "G-YZG0B4T82Z"
+      appId: "1:864560354333:web:5664d82a983f025ba062f4"
     };
 
     firebase.initializeApp(firebaseConfig);
     const db = firebase.database();
 
-    const camerasRef = db.ref("cameras");
-    const grid = document.getElementById("cameras-grid");
+    // FIX 2: TURN servers added
+    const RTC_CONFIG = {
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" },
+        { urls: "turn:openrelay.metered.ca:80",   username: "openrelayproject", credential: "openrelayproject" },
+        { urls: "turn:openrelay.metered.ca:443",  username: "openrelayproject", credential: "openrelayproject" },
+        { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
+      ]
+    };
+
+    const grid       = document.getElementById("cameras-grid");
     const emptyState = document.getElementById("empty-state");
-    const statusEl = document.getElementById("status");
+    const statusBar  = document.getElementById("statusBar");
 
-    const peerConnections = {};
-    const firebaseRefs = {};
+    // Unique viewer ID for this browser tab (for multi-viewer support)
+    const MY_VIEWER_ID = "viewer-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
 
-    camerasRef.on("value", (snapshot) => {
-      const cameras = snapshot.val();
-      grid.innerHTML = "";
-      if (!cameras) {
+    const peerConnections = {};  // cameraId -> RTCPeerConnection
+    const fbRefs          = {};  // cameraId -> [Firebase refs to cleanup]
+    const knownCameras    = {};  // cameraId -> true (to avoid duplicate cards)
+
+    const camerasRef = db.ref("cameras");
+
+    // FIX 3: Use child_added / child_removed instead of "value"
+    // — prevents full grid re-render and dropping existing connections
+    camerasRef.on("child_added", (snap) => {
+      const cameraId = snap.key;
+      const data     = snap.val();
+      if (!data || knownCameras[cameraId]) return;
+      knownCameras[cameraId] = true;
+      addCameraCard(cameraId, data);
+      updateUI();
+    });
+
+    camerasRef.on("child_removed", (snap) => {
+      const cameraId = snap.key;
+      cleanup(cameraId);
+      const card = document.getElementById(`card-${cameraId}`);
+      if (card) card.remove();
+      delete knownCameras[cameraId];
+      updateUI();
+    });
+
+    // FIX 4: Detect stale cameras (lastSeen > 30s ago) and mark them
+    camerasRef.on("child_changed", (snap) => {
+      const cameraId = snap.key;
+      const data     = snap.val();
+      if (!data) return;
+      const badge = document.getElementById(`badge-${cameraId}`);
+      if (!badge) return;
+      const stale = data.lastSeen && (Date.now() - data.lastSeen > 30000);
+      badge.className = stale ? "status-badge stale-badge" : "status-badge online";
+      badge.textContent = stale ? "STALE" : "LIVE";
+    });
+
+    function updateUI() {
+      const count = Object.keys(knownCameras).length;
+      if (count === 0) {
         emptyState.style.display = "block";
         grid.style.display = "none";
-        statusEl.textContent = "Waiting for cameras...";
-        return;
+        statusBar.textContent = "Waiting for cameras...";
+      } else {
+        emptyState.style.display = "none";
+        grid.style.display = "grid";
+        statusBar.textContent = `${count} camera${count > 1 ? "s" : ""} found`;
       }
-      emptyState.style.display = "none";
-      grid.style.display = "grid";
-      const count = Object.keys(cameras).length;
-      statusEl.textContent = `${count} camera${count > 1 ? 's' : ''} found`;
-      for (const [id, data] of Object.entries(cameras)) {
-        addCameraCard(id, data);
-      }
-    });
+    }
 
     function addCameraCard(cameraId, data) {
       const card = document.createElement("div");
       card.className = "camera-card online";
       card.id = `card-${cameraId}`;
       card.innerHTML = `
-        <div class="header">
+        <div class="card-header">
           <span class="name">${data.name || cameraId}</span>
-          <span class="status-badge online">LIVE</span>
+          <span class="status-badge online" id="badge-${cameraId}">LIVE</span>
         </div>
         <video id="video-${cameraId}" autoplay playsinline muted></video>
         <div class="actions">
-          <button id="btn-${cameraId}" data-camera-id="${cameraId}">Connect to Stream</button>
+          <button id="btn-${cameraId}">Connect to Stream</button>
         </div>
       `;
-      const btn = card.querySelector("button");
-      btn.addEventListener("click", () => connectToCamera(cameraId, btn));
+      card.querySelector("button").addEventListener("click", () => {
+        if (peerConnections[cameraId]) {
+          cleanup(cameraId);
+        } else {
+          connectToCamera(cameraId);
+        }
+      });
       grid.appendChild(card);
     }
 
-    async function connectToCamera(cameraId, btn) {
-      if (peerConnections[cameraId]) {
-        cleanup(cameraId);
-        return;
-      }
-
+    async function connectToCamera(cameraId) {
+      const btn = document.getElementById(`btn-${cameraId}`);
+      if (!btn) return;
       btn.disabled = true;
       btn.textContent = "Connecting...";
 
       try {
         const video = document.getElementById(`video-${cameraId}`);
-        const pc = new RTCPeerConnection({
-          iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-        });
-        peerConnections[cameraId] = pc;
 
-        const candidatesRef = db.ref(`cameras/${cameraId}/candidates`);
-        firebaseRefs[cameraId] = { candidatesRef };
+        // FIX 5: Multi-viewer — use per-viewer path under cameras/{camId}/viewers/{viewerId}
+        // FIX 2: Use full RTC_CONFIG with TURN
+        const pc = new RTCPeerConnection(RTC_CONFIG);
+        peerConnections[cameraId] = pc;
+        fbRefs[cameraId] = [];
+
+        // FIX 6: ICE candidate queue — buffer until remoteDescription is set
+        const iceCandQueue = [];
+        let remoteSet = false;
 
         pc.ontrack = (event) => {
           video.srcObject = event.streams[0];
           btn.textContent = "Disconnect";
           btn.disabled = false;
+          btn.className = "danger";
         };
 
+        pc.oniceconnectionstatechange = () => {
+          const state = pc.iceConnectionState;
+          if (state === "disconnected" || state === "failed") cleanup(cameraId);
+        };
+
+        // Signal to camera that we want to connect
+        const viewerReqRef = db.ref(`cameras/${cameraId}/viewerRequests/${MY_VIEWER_ID}`);
+        await viewerReqRef.set({ joined: Date.now() });
+        viewerReqRef.onDisconnect().remove();
+        fbRefs[cameraId].push(viewerReqRef);
+
+        // Wait for camera to write an offer for us
+        const offerRef = db.ref(`cameras/${cameraId}/viewers/${MY_VIEWER_ID}/offer`);
+        fbRefs[cameraId].push(offerRef);
+
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error("Camera offer timeout — is camera.html open?")), 10000);
+          offerRef.on("value", async (snap) => {
+            if (!snap.val()?.type) return;
+            clearTimeout(timeout);
+            offerRef.off();
+            resolve(snap.val());
+          });
+        }).then(async (offer) => {
+          await pc.setRemoteDescription(new RTCSessionDescription(offer));
+          remoteSet = true;
+
+          // Apply queued ICE candidates
+          for (const c of iceCandQueue) {
+            await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
+          }
+          iceCandQueue.length = 0;
+
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          await db.ref(`cameras/${cameraId}/viewers/${MY_VIEWER_ID}/answer`).set({
+            type: answer.type, sdp: answer.sdp
+          });
+        });
+
+        // Send our ICE candidates to camera
         pc.onicecandidate = (event) => {
-          if (event.candidate && peerConnections[cameraId]) {
-            db.ref(`cameras/${cameraId}/viewerCandidates`).push({
+          if (event.candidate) {
+            db.ref(`cameras/${cameraId}/viewers/${MY_VIEWER_ID}/viewerCandidates`).push({
               candidate: event.candidate.candidate,
               sdpMid: event.candidate.sdpMid,
               sdpMLineIndex: event.candidate.sdpMLineIndex
@@ -146,60 +240,58 @@
           }
         };
 
-        pc.oniceconnectionstatechange = () => {
-          if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed") {
-            cleanup(cameraId);
-          }
-        };
-
-        const camSnap = await db.ref(`cameras/${cameraId}`).once("value");
-        const cam = camSnap.val();
-        if (!cam || !cam.offer) throw new Error("No offer from camera");
-
-        await pc.setRemoteDescription(new RTCSessionDescription(cam.offer));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        await db.ref(`cameras/${cameraId}/answer`).set({ type: answer.type, sdp: answer.sdp });
-
-        candidatesRef.on("child_added", (snap) => {
-          const pc2 = peerConnections[cameraId];
-          if (pc2 && pc2.signalingState !== "closed" && snap.val()) {
-            const c = snap.val();
-            pc2.addIceCandidate(new RTCIceCandidate({ candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex }));
+        // Receive camera's ICE candidates
+        const camCandRef = db.ref(`cameras/${cameraId}/viewers/${MY_VIEWER_ID}/camCandidates`);
+        fbRefs[cameraId].push(camCandRef);
+        camCandRef.on("child_added", async (snap) => {
+          const c = snap.val();
+          if (!c || pc.signalingState === "closed") return;
+          if (!remoteSet) {
+            iceCandQueue.push(c);
+          } else {
+            await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
           }
         });
 
         btn.textContent = "Disconnect";
         btn.disabled = false;
+        btn.className = "danger";
 
       } catch (err) {
-        console.error(err);
-        statusEl.textContent = `Error: ${err.message}`;
-        btn.textContent = "Connect to Stream";
-        btn.disabled = false;
+        console.error("Connect error:", err);
+        statusBar.textContent = "Error: " + err.message;
+        if (btn) { btn.textContent = "Connect to Stream"; btn.disabled = false; btn.className = ""; }
         delete peerConnections[cameraId];
       }
     }
 
     function cleanup(cameraId) {
-      if (firebaseRefs[cameraId]) {
-        firebaseRefs[cameraId].candidatesRef.off();
-        delete firebaseRefs[cameraId];
+      // Turn off all Firebase listeners for this camera
+      if (fbRefs[cameraId]) {
+        fbRefs[cameraId].forEach(r => { try { r.off(); r.remove(); } catch (e) {} });
+        delete fbRefs[cameraId];
       }
       if (peerConnections[cameraId]) {
         peerConnections[cameraId].close();
         delete peerConnections[cameraId];
       }
+      // Clean up our viewer slot in Firebase
+      db.ref(`cameras/${cameraId}/viewers/${MY_VIEWER_ID}`).remove();
+      db.ref(`cameras/${cameraId}/viewerRequests/${MY_VIEWER_ID}`).remove();
+
       const btn = document.getElementById(`btn-${cameraId}`);
-      if (btn) {
-        btn.textContent = "Connect to Stream";
-        btn.disabled = false;
-      }
+      if (btn) { btn.textContent = "Connect to Stream"; btn.disabled = false; btn.className = ""; }
       const video = document.getElementById(`video-${cameraId}`);
       if (video) video.srcObject = null;
     }
 
-    statusEl.textContent = "Connected. Waiting for cameras...";
+    // FIX 7: Cleanup all listeners and Firebase refs on page close
+    window.addEventListener("beforeunload", () => {
+      camerasRef.off();
+      Object.keys(peerConnections).forEach(cleanup);
+    });
+
+    statusBar.textContent = "Connected. Waiting for cameras...";
   </script>
 </body>
 </html>

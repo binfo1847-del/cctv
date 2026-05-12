@@ -31,6 +31,7 @@
     #status.success { background: #2ecc7122; color: #2ecc71; border: 1px solid #2ecc7155; }
     #status.warn { background: #f39c1222; color: #f39c12; border: 1px solid #f39c1255; }
     .cam-id-display { font-size: 12px; color: #666; margin-top: 8px; }
+    .viewer-count { font-size: 12px; color: #5dcaa5; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -48,11 +49,16 @@
         <button id="stopBtn" class="danger" disabled>Stop</button>
       </div>
       <div class="cam-id-display" id="camIdDisplay"></div>
+      <div class="viewer-count" id="viewerCount"></div>
     </div>
     <div id="status" class="info">Click "Start Broadcast"</div>
   </div>
 
   <script>
+    // =====================================================================
+    // FIX 1: Firebase config — replace apiKey with your own from Firebase
+    // Console > Project Settings > Your apps > Web app config
+    // =====================================================================
     const firebaseConfig = {
       apiKey: "AIzaSyDewq8U_BYuu01lwgYYTYdvh6bxG8sB3Fc",
       authDomain: "cctv-4aa4c.firebaseapp.com",
@@ -60,28 +66,46 @@
       projectId: "cctv-4aa4c",
       storageBucket: "cctv-4aa4c.firebasestorage.app",
       messagingSenderId: "864560354333",
-      appId: "1:864560354333:web:5664d82a983f025ba062f4",
-      measurementId: "G-YZG0B4T82Z"
+      appId: "1:864560354333:web:5664d82a983f025ba062f4"
     };
 
     firebase.initializeApp(firebaseConfig);
     const db = firebase.database();
 
-    const localVideo = document.getElementById("localVideo");
-    const startBtn = document.getElementById("startBtn");
-    const stopBtn = document.getElementById("stopBtn");
-    const statusEl = document.getElementById("status");
-    const cameraNameInput = document.getElementById("cameraName");
+    const localVideo   = document.getElementById("localVideo");
+    const startBtn     = document.getElementById("startBtn");
+    const stopBtn      = document.getElementById("stopBtn");
+    const statusEl     = document.getElementById("status");
     const camIdDisplay = document.getElementById("camIdDisplay");
+    const viewerCount  = document.getElementById("viewerCount");
+
+    // FIX 2: TURN server added — fixes P2P fail on different networks (4G vs WiFi)
+    const RTC_CONFIG = {
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" },
+        // Free TURN from metered.ca — register at https://www.metered.ca/tools/openrelay/
+        // Replace with your own for production
+        { urls: "turn:openrelay.metered.ca:80",   username: "openrelayproject", credential: "openrelayproject" },
+        { urls: "turn:openrelay.metered.ca:443",  username: "openrelayproject", credential: "openrelayproject" },
+        { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
+      ]
+    };
 
     let localStream = null;
-    let pc = null;
-    let cameraId = null;
-    let cameraRef = null;
-    let answerRef = null;
-    let viewerCandRef = null;
+    let cameraId    = null;
+    let cameraRef   = null;
+    let heartbeatInterval = null;
+
+    // FIX 3: Multi-viewer support — each viewer gets own PeerConnection
+    // viewers map: { viewerId -> { pc, refs } }
+    const viewers = {};
 
     function setStatus(msg, type) { statusEl.textContent = msg; statusEl.className = type || "info"; }
+    function updateViewerCount() {
+      const n = Object.keys(viewers).length;
+      viewerCount.textContent = n > 0 ? `${n} viewer${n > 1 ? "s" : ""} connected` : "";
+    }
 
     if (location.protocol === "file:") {
       setStatus("Use a local server:\nnpx serve .\n\nThen open http://localhost:3000/camera.html", "error");
@@ -98,7 +122,6 @@
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
         localVideo.srcObject = localStream;
-        setStatus("Camera is live. Starting WebRTC broadcast...", "success");
       } catch (err) {
         startBtn.disabled = false;
         if (err.name === "NotAllowedError") setStatus("Camera permission denied.\nAllow camera access and try again.", "error");
@@ -108,19 +131,61 @@
       }
 
       stopBtn.disabled = false;
-      const name = cameraNameInput.value.trim() || "Camera";
-      cameraId = name.toLowerCase().replace(/[^a-z0-9]/g, "-") + "-" + Date.now().toString(36);
+      const name = document.getElementById("cameraName").value.trim() || "Camera";
+      cameraId  = name.toLowerCase().replace(/[^a-z0-9]/g, "-") + "-" + Date.now().toString(36);
       cameraRef = db.ref("cameras/" + cameraId);
       camIdDisplay.textContent = "Camera ID: " + cameraId;
 
-      // WebRTC setup (separate try/catch - won't stop camera if it fails)
       try {
-        pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+        // Write camera info to Firebase (no offer here — offer is per-viewer now)
+        await cameraRef.set({ name, status: "online", lastSeen: Date.now() });
+        cameraRef.onDisconnect().remove();
+
+        // FIX 4: Heartbeat — updates lastSeen every 10s so stale cameras can be detected
+        heartbeatInterval = setInterval(() => {
+          if (cameraRef) cameraRef.update({ lastSeen: Date.now() });
+        }, 10000);
+
+        setStatus(`Broadcasting "${name}" — waiting for viewers...`);
+
+        // FIX 3 (cont): Listen for viewer join requests
+        // Each viewer writes to cameras/{camId}/viewerRequests/{viewerId}
+        const requestsRef = db.ref(`cameras/${cameraId}/viewerRequests`);
+        requestsRef.on("child_added", async (snap) => {
+          const viewerId = snap.key;
+          if (viewers[viewerId]) return; // already handling this viewer
+          await handleNewViewer(viewerId);
+        });
+
+        // Clean up viewers who disconnected
+        const answersRef = db.ref(`cameras/${cameraId}/viewers`);
+        answersRef.on("child_removed", (snap) => {
+          const viewerId = snap.key;
+          cleanupViewer(viewerId);
+        });
+
+      } catch (err) {
+        console.error("Firebase error:", err);
+        setStatus("Broadcast setup failed:\n" + err.message + "\n\nCheck Firebase Rules.", "error");
+      }
+    }
+
+    async function handleNewViewer(viewerId) {
+      try {
+        // FIX 2 (cont): Use full RTC_CONFIG with TURN servers
+        const pc = new RTCPeerConnection(RTC_CONFIG);
+        viewers[viewerId] = { pc, refs: [] };
+        updateViewerCount();
+
         localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+        // FIX 5: ICE candidate queue — buffer candidates until remoteDescription is set
+        const iceCandQueue = [];
+        let remoteSet = false;
 
         pc.onicecandidate = (event) => {
           if (event.candidate) {
-            db.ref("cameras/" + cameraId + "/candidates").push({
+            db.ref(`cameras/${cameraId}/viewers/${viewerId}/camCandidates`).push({
               candidate: event.candidate.candidate,
               sdpMid: event.candidate.sdpMid,
               sdpMLineIndex: event.candidate.sdpMLineIndex
@@ -129,57 +194,94 @@
         };
 
         pc.oniceconnectionstatechange = () => {
-          if (pc.iceConnectionState === "connected") setStatus("Viewer connected! Streaming...", "success");
-          else if (pc.iceConnectionState === "disconnected") setStatus("Waiting for viewer...");
-          else if (pc.iceConnectionState === "failed") setStatus("Connection failed. Camera still running.", "warn");
+          const state = pc.iceConnectionState;
+          if (state === "connected" || state === "completed") {
+            setStatus(`Viewer${Object.keys(viewers).length > 1 ? "s" : ""} connected! Streaming...`, "success");
+          } else if (state === "failed") {
+            cleanupViewer(viewerId);
+          }
+          updateViewerCount();
         };
 
+        // Create offer for this specific viewer
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
-        setStatus("Writing to Firebase...");
-        await cameraRef.set({ name: name, status: "online", offer: { type: offer.type, sdp: offer.sdp } });
-        cameraRef.onDisconnect().remove();
-        setStatus("Broadcasting \"" + name + "\" - waiting for viewer...");
+        // Write offer for this viewer
+        await db.ref(`cameras/${cameraId}/viewers/${viewerId}/offer`).set({
+          type: offer.type, sdp: offer.sdp
+        });
 
-        answerRef = db.ref("cameras/" + cameraId + "/answer");
-        viewerCandRef = db.ref("cameras/" + cameraId + "/viewerCandidates");
-
-        answerRef.on("value", (snap) => {
-          if (snap.val() && snap.val().type) {
-            if (pc && pc.signalingState !== "closed") {
-              pc.setRemoteDescription(new RTCSessionDescription(snap.val()));
-              setStatus("Viewer connected! Streaming...", "success");
+        // Listen for viewer's answer
+        const answerRef = db.ref(`cameras/${cameraId}/viewers/${viewerId}/answer`);
+        viewers[viewerId].refs.push(answerRef);
+        answerRef.on("value", async (snap) => {
+          if (snap.val()?.type && pc.signalingState !== "closed" && !remoteSet) {
+            remoteSet = true;
+            await pc.setRemoteDescription(new RTCSessionDescription(snap.val()));
+            // FIX 5: Apply queued ICE candidates after remoteDescription is set
+            for (const c of iceCandQueue) {
+              await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
             }
+            iceCandQueue.length = 0;
           }
         });
 
-        viewerCandRef.on("child_added", (snap) => {
-          if (snap.val() && pc && pc.signalingState !== "closed") {
-            const c = snap.val();
-            pc.addIceCandidate(new RTCIceCandidate({ candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex }));
+        // Listen for viewer's ICE candidates
+        const viewerCandRef = db.ref(`cameras/${cameraId}/viewers/${viewerId}/viewerCandidates`);
+        viewers[viewerId].refs.push(viewerCandRef);
+        viewerCandRef.on("child_added", async (snap) => {
+          const c = snap.val();
+          if (!c || pc.signalingState === "closed") return;
+          if (!remoteSet) {
+            // FIX 5: Queue if remoteDescription not set yet
+            iceCandQueue.push(c);
+          } else {
+            await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
           }
         });
 
       } catch (err) {
-        console.error("WebRTC/Firebase error:", err);
-        setStatus("Camera is running but broadcast setup failed:\n" + err.message + "\n\nCheck Firebase Rules: Realtime Database > Rules\nSet .read and .write to true", "error");
+        console.error("Viewer setup error:", err);
+        cleanupViewer(viewerId);
       }
     }
 
+    function cleanupViewer(viewerId) {
+      const v = viewers[viewerId];
+      if (!v) return;
+      v.refs.forEach(r => r.off());
+      if (v.pc) v.pc.close();
+      // Clean up viewer's Firebase data
+      if (cameraId) db.ref(`cameras/${cameraId}/viewers/${viewerId}`).remove();
+      delete viewers[viewerId];
+      updateViewerCount();
+    }
+
     function stopBroadcast() {
-      if (answerRef) { answerRef.off(); answerRef = null; }
-      if (viewerCandRef) { viewerCandRef.off(); viewerCandRef = null; }
-      if (pc) { pc.close(); pc = null; }
+      // Clean up all viewers
+      Object.keys(viewers).forEach(cleanupViewer);
+
+      // Stop heartbeat
+      if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
+
+      // Stop media
       if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
-      if (cameraRef) { cameraRef.remove(); cameraRef = null; }
       localVideo.srcObject = null;
+
+      // Remove from Firebase
+      if (cameraRef) { cameraRef.remove(); cameraRef = null; }
+
       cameraId = null;
       startBtn.disabled = false;
-      stopBtn.disabled = true;
+      stopBtn.disabled  = true;
       camIdDisplay.textContent = "";
+      viewerCount.textContent  = "";
       setStatus("Broadcast stopped", "info");
     }
+
+    // FIX 6: Cleanup Firebase listener on page unload
+    window.addEventListener("beforeunload", stopBroadcast);
   </script>
 </body>
 </html>
