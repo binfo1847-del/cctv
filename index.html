@@ -137,7 +137,11 @@
 
         pc.onicecandidate = (event) => {
           if (event.candidate) {
-            db.ref(`cameras/${cameraId}/viewerCandidates`).push(event.candidate.toJSON());
+            db.ref(`cameras/${cameraId}/viewerCandidates`).push({
+              candidate: event.candidate.candidate,
+              sdpMid: event.candidate.sdpMid,
+              sdpMLineIndex: event.candidate.sdpMLineIndex
+            });
           }
         };
 
@@ -154,10 +158,13 @@
         await pc.setRemoteDescription(new RTCSessionDescription(cam.offer));
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        await db.ref(`cameras/${cameraId}/answer`).set(answer.toJSON());
+        await db.ref(`cameras/${cameraId}/answer`).set({ type: answer.type, sdp: answer.sdp });
 
         db.ref(`cameras/${cameraId}/candidates`).on("child_added", (snap) => {
-          if (snap.val()) pc.addIceCandidate(new RTCIceCandidate(snap.val()));
+          if (snap.val()) {
+            const c = snap.val();
+            pc.addIceCandidate(new RTCIceCandidate({ candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex }));
+          }
         });
 
         btn.textContent = "Disconnect";
