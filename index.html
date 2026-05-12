@@ -261,6 +261,12 @@
         <div class="actions">
           <button id="btn-${cameraId}">▶ Connect to Stream</button>
         </div>
+        <div class="volume-row" id="vol-row-${cameraId}" style="display:none; padding:6px 16px 10px; align-items:center; gap:10px;">
+          <span style="font-size:16px">🔊</span>
+          <input type="range" min="0" max="1" step="0.05" value="1"
+            style="flex:1; accent-color:#1d9e75; cursor:pointer;"
+            oninput="document.getElementById('video-${cameraId}').volume=this.value">
+        </div>
 
         <!-- Remote Control Panel — always visible, commands work even without stream -->
         <div class="remote-panel visible" id="remote-${cameraId}">
@@ -319,6 +325,12 @@
 
         pc.ontrack = (event) => {
           video.srcObject = event.streams[0];
+          // Unmute — browser requires user gesture; connect button click qualifies
+          video.muted = false;
+          video.volume = 1.0;
+          // Show volume slider
+          const volRow = document.getElementById(`vol-row-${cameraId}`);
+          if (volRow) volRow.style.display = "flex";
           btn.textContent = "⏸ Disconnect";
           btn.disabled = false;
           btn.className = "danger";
@@ -401,7 +413,9 @@
       const btn = document.getElementById(`btn-${cameraId}`);
       if (btn) { btn.textContent = "▶ Connect to Stream"; btn.disabled = false; btn.className = ""; }
       const video = document.getElementById(`video-${cameraId}`);
-      if (video) video.srcObject = null;
+      if (video) { video.srcObject = null; video.muted = true; }
+      const volRow = document.getElementById(`vol-row-${cameraId}`);
+      if (volRow) volRow.style.display = 'none';
     }
 
     window.addEventListener("beforeunload", () => {
