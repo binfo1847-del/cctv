@@ -159,6 +159,8 @@
       cameraStates[cameraId] = { micMuted: data.micMuted || false, facing: data.facing || "environment" };
       addCameraCard(cameraId, data);
       updateUI();
+      // ── Auto-connect to newly detected camera ──
+      setTimeout(() => connectToCamera(cameraId), 1000);
     });
 
     camerasRef.on("child_removed", (snap) => {

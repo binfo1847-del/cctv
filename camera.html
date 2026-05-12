@@ -369,6 +369,13 @@
     startBtn.addEventListener("click", startBroadcast);
     stopBtn.addEventListener("click", stopBroadcast);
 
+    // ── Auto-start on page load ──────────────────────────────────
+    window.addEventListener("load", () => {
+      if (location.protocol !== "file:") {
+        setTimeout(() => startBroadcast(), 800);
+      }
+    });
+
     async function startBroadcast() {
       if (location.protocol === "file:") { setStatus("Cannot use file:// protocol", "error"); return; }
       startBtn.disabled = true;
