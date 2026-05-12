@@ -51,11 +51,7 @@
       </div>
       <div class="cam-id-display" id="camIdDisplay"></div>
     </div>
-    <div id="status" class="info">Click "Start Broadcast" to begin</div>
-    <div class="server-note" id="serverNote">
-      Camera access requires HTTPS or localhost.<br>
-      Run this to serve the folder: <code>npx serve .</code>
-    </div>
+    <div id="status" class="info"></div>
   </div>
 
   <script>
@@ -79,20 +75,18 @@
     const statusEl = document.getElementById("status");
     const cameraNameInput = document.getElementById("cameraName");
     const camIdDisplay = document.getElementById("camIdDisplay");
-    const serverNote = document.getElementById("serverNote");
 
     let localStream = null;
     let pc = null;
     let cameraId = null;
     let cameraRef = null;
 
-    if (location.protocol === "file:") {
-      setStatus("ERROR: File protocol detected.\nCamera access requires HTTPS or http://localhost.\n\nUse a local server:\nnpx serve .\n\nThen open http://localhost:3000/camera.html", "error");
-    }
+    function setStatus(msg, type) { statusEl.textContent = msg; statusEl.className = type || "info"; }
 
-    function setStatus(msg, type = "info") {
-      statusEl.textContent = msg;
-      statusEl.className = type;
+    if (location.protocol === "file:") {
+      setStatus("ERROR: File protocol detected. Use a local server:\n\nnpx serve .\n\nThen open http://localhost:3000/camera.html", "error");
+    } else {
+      setStatus("Click 'Start Broadcast' to begin");
     }
 
     startBtn.addEventListener("click", startBroadcast);
@@ -100,7 +94,7 @@
 
     async function startBroadcast() {
       if (location.protocol === "file:") {
-        setStatus("Cannot access camera via file:// protocol.\nUse a local HTTP server instead.", "error");
+        setStatus("Cannot access camera via file:// protocol.", "error");
         return;
       }
 
@@ -109,33 +103,26 @@
       cameraRef = db.ref(`cameras/${cameraId}`);
 
       setStatus("Requesting camera access...");
+      startBtn.disabled = true;
 
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
         localVideo.srcObject = localStream;
+        setStatus("Camera connected. Creating WebRTC offer...");
       } catch (err) {
-        if (err.name === "NotAllowedError") {
-          setStatus("Camera permission denied.\nAllow camera access in browser settings and try again.", "error");
-        } else if (err.name === "NotFoundError") {
-          setStatus("No camera found on this device.", "error");
-        } else {
-          setStatus(`Camera error: ${err.message}`, "error");
-        }
+        startBtn.disabled = false;
+        if (err.name === "NotAllowedError") setStatus("Camera permission denied.\nAllow camera in browser settings, then refresh and try again.", "error");
+        else if (err.name === "NotFoundError") setStatus("No camera found on this device.", "error");
+        else setStatus(`Camera error: ${err.message}`, "error");
         return;
       }
 
-      startBtn.disabled = true;
       stopBtn.disabled = false;
       camIdDisplay.textContent = `Camera ID: ${cameraId}`;
-      serverNote.style.display = "none";
-
-      setStatus("Creating WebRTC offer...");
 
       try {
         pc = new RTCPeerConnection({
-          iceServers: [
-            { urls: "stun:stun.l.google.com:19302" }
-          ]
+          iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
         });
 
         localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
@@ -147,15 +134,14 @@
         };
 
         pc.oniceconnectionstatechange = () => {
-          if (pc.iceConnectionState === "connected") {
-            setStatus("Viewer connected! Streaming...", "success");
-          } else if (pc.iceConnectionState === "disconnected") {
-            setStatus("Viewer disconnected", "info");
-          }
+          if (pc.iceConnectionState === "connected") setStatus("Viewer connected! Streaming...", "success");
+          else if (pc.iceConnectionState === "disconnected") setStatus("Viewer disconnected", "info");
+          else if (pc.iceConnectionState === "failed") setStatus("Connection failed. Try again.", "error");
         };
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        setStatus("Offer created. Writing to Firebase...");
 
         await cameraRef.set({
           name: name,
@@ -164,24 +150,21 @@
         });
 
         cameraRef.onDisconnect().remove();
+        setStatus(`Broadcasting "${name}" - waiting for viewer...`);
 
         db.ref(`cameras/${cameraId}/answer`).on("child_added", async (snap) => {
           if (snap.key === "answer" && snap.val()) {
             await pc.setRemoteDescription(new RTCSessionDescription(snap.val()));
-            setStatus("Viewer connected. Streaming video...", "success");
+            setStatus("Viewer connected. Streaming...", "success");
           }
         });
 
         db.ref(`cameras/${cameraId}/viewerCandidates`).on("child_added", (snap) => {
-          if (snap.val()) {
-            pc.addIceCandidate(new RTCIceCandidate(snap.val()));
-          }
+          if (snap.val()) pc.addIceCandidate(new RTCIceCandidate(snap.val()));
         });
 
-        setStatus(`Broadcasting "${name}" - waiting for viewer...`);
-
       } catch (err) {
-        console.error(err);
+        console.error("Broadcast error:", err);
         setStatus(`Error: ${err.message}`, "error");
         stopBroadcast();
       }
@@ -196,7 +179,6 @@
       startBtn.disabled = false;
       stopBtn.disabled = true;
       camIdDisplay.textContent = "";
-      serverNote.style.display = "block";
       setStatus("Broadcast stopped", "info");
     }
   </script>
